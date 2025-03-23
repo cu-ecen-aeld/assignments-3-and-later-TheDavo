@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Prints a message showing the number of lines and the matching grep pattern
 # for the inputs
 # Accepts the following runtime arguments: 
