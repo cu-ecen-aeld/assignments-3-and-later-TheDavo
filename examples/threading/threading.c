@@ -22,6 +22,7 @@ void *threadfunc(void *thread_param) {
   // convert from milliseconds to microseconds
   usleep(thread_func_args->wait_to_obtain_ms * 1000);
 
+  // early return if the mutex lock fails
   if (pthread_mutex_lock(thread_func_args->thread_mutex) != 0) {
     thread_func_args->thread_complete_success = false;
     return thread_param;
@@ -52,6 +53,10 @@ bool start_thread_obtaining_mutex(pthread_t *thread, pthread_mutex_t *mutex,
    */
 
   struct thread_data *my_thread_data = malloc(sizeof(struct thread_data));
+  if (my_thread_data == NULL) {
+    perror("Error on malloc call for thread params\n");
+    return false;
+  }
   my_thread_data->thread_complete_success = false;
   my_thread_data->thread_mutex = mutex;
   my_thread_data->wait_to_obtain_ms = wait_to_obtain_ms;
