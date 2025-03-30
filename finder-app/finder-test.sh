@@ -11,7 +11,7 @@ WRITESTR=AELD_IS_FUN
 WRITEDIR=/tmp/aeld-data
 # username=$(cat conf/username.txt)
 # for homework 4 assignment 2:
-username=$(can /etc/finder-app/conf/username.txt)
+username=$(cat /etc/finder-app/conf/username.txt)
 ASSIGNMENT4_FILE=/tmp/assignment4-result.txt
 
 # change user directory to where ./finder-test.sh is so that the later
