@@ -1,5 +1,9 @@
 # learned from makefiletutorial.com
 CROSS_COMPILE=
+
+all: writer
+.PHONY: all
+	
 writer: writer.o
 	$(CROSS_COMPILE)gcc writer.o -o writer
 
