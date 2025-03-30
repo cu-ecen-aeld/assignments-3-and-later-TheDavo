@@ -1,14 +1,14 @@
 # learned from makefiletutorial.com
-CROSS_COMPILE=
+CC=aarch64-none-linux-gnu-gcc
 
 all: writer
-.PHONY: all
+.PHONY: all clean
 	
 writer: writer.o
-	$(CROSS_COMPILE)gcc writer.o -o writer
+	$(CC) writer.o -o writer
 
 writer.o: writer.c
-	$(CROSS_COMPILE)gcc -c writer.c -o writer.o
+	$(CC) -c writer.c -o writer.o
 
 clean:
 	rm -f ./writer ./writer.o
