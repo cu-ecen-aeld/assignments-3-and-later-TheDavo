@@ -70,7 +70,7 @@ done
 
 OUTPUTSTRING=$(./finder.sh "$WRITEDIR" "$WRITESTR")
 # for homework 4 assignment 2:
-echo OUTPUTSTRING > ${ASSIGNMENT4_FILE}
+echo ${OUTPUTSTRING} > ${ASSIGNMENT4_FILE}
 
 # remove temporary directories
 rm -rf /tmp/aeld-data
