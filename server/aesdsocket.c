@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <asm-generic/socket.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -12,172 +13,269 @@
 #include <sys/syslog.h>
 #include <sys/types.h>
 #include <syslog.h>
+#include <time.h>
 #include <unistd.h>
 
 #define BACKLOG 10
 #define PORT "9000"
 #define AESDFILE "/var/tmp/aesdsocketdata"
-#define BUFSIZE 1024
+#define BUFSIZE 4096
 
 volatile sig_atomic_t shutdown_flag = 0;
 
+// start client thread and file
 struct file_with_lock {
-  pthread_mutex_t file_lock;
+  pthread_mutex_t file_mut;
   FILE *file;
 };
 
-void free_file_with_lock(struct file_with_lock *fwl) {
-  pthread_mutex_destroy(&(fwl->file_lock));
-  if (fwl->file != NULL) {
-    fclose(fwl->file);
-  }
+struct file_with_lock *fwl;
+
+void file_with_lock_free(struct file_with_lock *fwl) {
+  pthread_mutex_destroy(&fwl->file_mut);
+  fclose(fwl->file);
   free(fwl);
-  fwl = NULL;
 }
 
-typedef struct client_thread_node {
+struct client_node {
   int clientfd;
-  pthread_t thread;
-  bool thread_exited;
-  bool thread_err;
+  struct sockaddr_storage inc_addr;
+  socklen_t inc_addr_size;
   char ipstr[INET6_ADDRSTRLEN];
-  struct file_with_lock *fwl;
+  bool operation_complete;
+};
 
-  struct client_thread_node *next;
-
-} client_thread_node_t;
-
-client_thread_node_t *new_client_thread_node(int clientfd, pthread_t thread,
-                                             char ipstr[INET6_ADDRSTRLEN],
-                                             struct file_with_lock *fwl) {
-  client_thread_node_t *new_node = malloc(sizeof(client_thread_node_t));
-  if (new_node == NULL) {
-    syslog(LOG_ERR, "Error allocating memory for new client thread node");
+/**
+ * client_node_new takes in struct members, allocates space for a new 
+ * `client_node` struct and assigns the members.
+ *
+ * This function also calls `inet_ntop` to get the calling ip addr
+*/
+struct client_node *client_node_new(int clientfd,
+                                    struct sockaddr_storage inc_addr,
+                                    socklen_t inc_addr_size) {
+  struct client_node *c_node = malloc(sizeof(struct client_node));
+  if (c_node == NULL) {
     return NULL;
   }
-  new_node->clientfd = clientfd;
-  new_node->thread = thread;
-  new_node->thread_exited = false;
-  new_node->thread_err = false;
-  new_node->fwl = fwl;
-  strcpy(new_node->ipstr, ipstr);
+  c_node->clientfd = clientfd;
+  c_node->inc_addr = inc_addr;
+  c_node->inc_addr_size = inc_addr_size;
+  c_node->operation_complete = false;
+  struct sockaddr_in *s = (struct sockaddr_in *)&inc_addr;
+  inet_ntop(AF_INET, &s->sin_addr, c_node->ipstr, sizeof c_node->ipstr);
+  syslog(LOG_INFO, "Accepted connection from %s", c_node->ipstr);
 
-  return new_node;
+  return c_node;
 }
 
-void llist_remove_at(client_thread_node_t **head, int pos);
-void llist_remove_by_pthread(client_thread_node_t **head, pthread_t thread) {
-  client_thread_node_t *current = *head;
-  client_thread_node_t *previous= *head;
+struct client_thread_node {
+  struct client_node *client_node;
+  pthread_t tid;
 
+  struct client_thread_node *next;
+};
+
+// end client thread and file
+
+// linked list functions
+
+/**
+ * list_add_to_start takes a pointer to a new `struct client_thread_node`
+ * pointer and adds it to the front of the list
+ */
+void list_add_to_start(struct client_thread_node **head,
+                       struct client_thread_node *new_node) {
+  // *head doesn't point to anything, set new_node as head
   if (*head == NULL) {
-    syslog(LOG_INFO, "Client thread list is empty");
-  } else if ((*head)->thread == thread) {
-    *head = current->next;
-    free(current);
-    current = NULL;
-  } else {
-    while (current != NULL && current->thread != thread) {
-      previous = current;
-      current = current->next;
-    }
-    if (current !=  NULL) {
-      // found the node with the pthread needed
-      previous->next = current->next;
-      free(current);
-      current = NULL;
-    } else {
-      syslog(LOG_ERR, "Thread %lu not found", thread);
-    }
+    *head = new_node;
+    (*head)->next = NULL;
+    return;
   }
+  new_node->next = *head;
+  *head = new_node;
 }
-void llist_add_to_end(client_thread_node_t *head,
-                      client_thread_node_t *new_node) {
-  if (head == NULL) {
+
+/**
+ * list_remove_head takes in a `struct client_thread_node` double pointer
+ * to remove the head from the list
+ *
+ * This function also handles freeing the memory of the removed list entry
+ */
+void list_remove_head(struct client_thread_node **head) {
+  if (*head == NULL) {
     return;
   }
 
-  client_thread_node_t *curr = head;
-  while (curr->next != NULL) {
-    curr = curr->next;
-  }
-
-  curr->next = new_node;
+  struct client_thread_node *temp = *head;
+  *head = (*head)->next;
+  free(temp->client_node);
+  free(temp);
 }
 
-void *handle_connection(void *client_thread_arg) {
-  client_thread_node_t *node = (client_thread_node_t *)client_thread_arg;
+/**
+ * list_remove_using_client_file_node searches the linked list, starting from
+ * the head node, looking for a list entry that has the same thread id as the
+ * `cft` node
+ *
+ * This function handles freeing the memory of the removed list entry
+ */
+void list_remove_using_client_file_node(struct client_thread_node **head,
+                                        struct client_thread_node *cft) {
+  // empty list
+  if (*head == NULL) {
+    return;
+  }
+
+  struct client_thread_node *temp = *head;
+  struct client_thread_node *prev = NULL;
+
+  if (temp != NULL && temp->tid == cft->tid) {
+    *head = temp->next;
+    free(temp->client_node);
+    free(temp);
+    return;
+  }
+
+  while (temp != NULL && temp->tid != cft->tid) {
+    prev = temp;
+    temp = temp->next;
+  }
+
+  // value not found
+  if (temp == NULL) {
+    return;
+  }
+
+  // found the same thread id, time remove that from the list
+  prev->next = temp->next;
+  free(temp->client_node);
+  free(temp);
+}
+
+// end linked list functions
+
+/**
+ * handle_connection is a pthread function meant to handle the client connection
+ * and write to the AESD file
+ *
+ * The `void *_node` is cast into a type of `struct client_node`
+ */
+void *handle_connection(void *_node) {
+  struct client_node *node = (struct client_node *)_node;
 
   // receive messages
-  char *buf = malloc(sizeof(char) * BUFSIZE);
-  if (buf == NULL) {
-    syslog(LOG_ERR, "Error on mallocing buffer for reading");
-    node->thread_err = true;
-    pthread_exit(NULL);
-  }
+  char *buffer = malloc(sizeof(char) * BUFSIZE);
+  memset(buffer, 0, sizeof(char) * BUFSIZE);
 
-  if (node->fwl->file == NULL) {
-    syslog(LOG_ERR, "File pointer is NULL");
-    node->thread_err = true;
-    pthread_exit(NULL);
-  }
   int read_bytes = 0;
   char *line = NULL;
   size_t len = 0;
   ssize_t read_line_count;
 
-  while ((read_bytes = recv(node->clientfd, buf, BUFSIZE, 0)) > 0) {
-    syslog(LOG_INFO, "recv bytes %d", read_bytes);
-
-    char *newline_pos = (char *)memchr(buf, '\n', read_bytes);
+  while ((read_bytes = recv(node->clientfd, buffer, BUFSIZE, 0)) > 0) {
+    char *newline_pos = (char *)memchr(buffer, '\n', read_bytes);
 
     // found a newline in the buffer, write to the file and then
     // send file contents
-
-    // LOCK MUTEX
-    // this is where the file contents are written to, so mutex lock that
-    pthread_mutex_lock(&(node->fwl->file_lock));
     if (newline_pos != NULL) {
 
+      pthread_mutex_lock(&(fwl->file_mut));
+      if (fwl->file == NULL) {
+        syslog(LOG_ERR, "File pointer is NULL");
+        pthread_mutex_unlock(&(fwl->file_mut));
+        pthread_exit(NULL);
+      }
       // the +1 is there to include the newline character from the buffer
-      fwrite(buf, sizeof(char), newline_pos - buf + 1, node->fwl->file);
+      fwrite(buffer, sizeof(char), newline_pos - buffer + 1, fwl->file);
       // fflush is here to force the file to be written and not stored
       // in the kernel buffer
-      fflush(node->fwl->file);
+      fflush(fwl->file);
 
-      rewind(node->fwl->file);
-      while ((read_line_count = getline(&line, &len, node->fwl->file)) != -1) {
-        syslog(LOG_INFO, "Sending line %s", line);
+      rewind(fwl->file);
+      while ((read_line_count = getline(&line, &len, fwl->file)) != -1) {
+        // syslog(LOG_INFO, "Sending line %s", line);
         send(node->clientfd, line, read_line_count, 0);
       }
-      free(line);
+      pthread_mutex_unlock(&(fwl->file_mut));
     } else {
       // no newline character found, add whole buffer to file
-      syslog(LOG_INFO, "Adding all content to file");
-      fwrite(buf, sizeof(char), read_bytes, node->fwl->file);
-      fflush(node->fwl->file);
-      syslog(LOG_INFO, "All content added");
+      pthread_mutex_lock(&(fwl->file_mut));
+      fwrite(buffer, sizeof(char), read_bytes, fwl->file);
+      fflush(fwl->file);
+      pthread_mutex_unlock(&(fwl->file_mut));
     }
-    // UNLOCK MUTEX
-    pthread_mutex_unlock(&(node->fwl->file_lock));
   }
 
-  node->thread_exited = true;
-  free(buf);
-  buf = NULL;
+  node->operation_complete = true;
+  free(line);
+  free(buffer);
   if (read_bytes == 0) {
     syslog(LOG_INFO, "Closed connection from %s", node->ipstr);
   }
   if (read_bytes == -1) {
-    node->thread_err = true;
+    syslog(LOG_ERR, "Error reading all bytes from server");
   }
   pthread_exit(NULL);
 }
 
-void raise_shutdown_flag(int signo) {
-  syslog(LOG_INFO, "Caught signal, exiting");
-  shutdown_flag = 1;
+/**
+ * handle_timestamp is a pthread function that writes a timestamp string
+ * every (10) seconds to the AESD file
+ */
+void *handle_timestamp() {
+  // from strftime man page
+  char outstr[BUFSIZE];
+  memset(&outstr, 0, BUFSIZE);
+  time_t t;
+  struct tm *tmp;
+
+  // this initial sleep call is here because if this thread started first
+  // prior to the client socket threads the test would fail as the first
+  // line in the temporary file is a timestamp and not a client read
+  sleep(10);
+
+  // global shutdown flag signal
+  while (!shutdown_flag) {
+    if (shutdown_flag) {
+      break;
+    }
+    t = time(NULL);
+    tmp = localtime(&t);
+    if (tmp == NULL) {
+      syslog(LOG_ERR, "localtime error");
+      pthread_exit(NULL);
+    }
+
+    char *rfc_2822 = "timestamp:%a, %d %b %Y %T %z%n";
+
+    if (strftime(outstr, sizeof(outstr), rfc_2822, tmp) == 0) {
+      syslog(LOG_ERR, "strftime returned 0");
+      pthread_exit(NULL);
+    }
+
+    // everything looks ok, write to file
+    pthread_mutex_lock(&(fwl->file_mut));
+    if (fwl->file == NULL) {
+      syslog(LOG_ERR, "File pointer is NULL");
+      pthread_mutex_unlock(&(fwl->file_mut));
+      pthread_exit(NULL);
+    }
+    fwrite(outstr, sizeof(char), sizeof(outstr), fwl->file);
+    fflush(fwl->file);
+    pthread_mutex_unlock(&(fwl->file_mut));
+    sleep(10);
+  }
+
+  pthread_exit(NULL);
 }
+
+/**
+ * raise_shutdown_flag catches the SIG_INT and SIG_TERM signals and changes
+ * the `shutdown_flag` to (1), causing the infinite while loops to exit
+ * and close the program
+*/
+void raise_shutdown_flag(int signo) { shutdown_flag = 1; }
 
 void print_usage(void) {
   printf("USAGE for aesdsocket\n");
@@ -258,6 +356,7 @@ int main(int argc, char **argv) {
   }
 
   // fork here if in daemon mode
+  int dev_null;
   if (daemon) {
     pid_t fork_pid = fork();
     if (fork_pid == -1) {
@@ -279,6 +378,25 @@ int main(int argc, char **argv) {
 
     // if not the parent process, child process will take from here
     chdir("/");
+
+    // redirect stdin/out/err to dev/null
+    if ((dev_null = open("dev/null", O_RDWR)) < 0) {
+      syslog(LOG_ERR, "Error opening dev/null");
+      return (-1);
+    }
+
+    if (dup2(dev_null, STDIN_FILENO) == -1) {
+      syslog(LOG_ERR, "Error redirecting stdin to dev/null");
+      return (-1);
+    }
+    if (dup2(dev_null, STDOUT_FILENO) == -1) {
+      syslog(LOG_ERR, "Error redirecting stdout to dev/null");
+      return (-1);
+    }
+    if (dup2(dev_null, STDERR_FILENO) == -1) {
+      syslog(LOG_ERR, "Error redirecting stderr to dev/null");
+      return (-1);
+    }
   }
 
   if (listen(sockfd, BACKLOG) == -1) {
@@ -290,13 +408,13 @@ int main(int argc, char **argv) {
   }
 
   // now can accept incoming connections
-
-  struct sockaddr_storage inc_addr;
-  socklen_t inc_addr_size = sizeof inc_addr;
-
-  struct file_with_lock *fwl = malloc(sizeof(struct file_with_lock));
-  if (pthread_mutex_init(&(fwl->file_lock), NULL) < 0) {
+  fwl = malloc(sizeof(struct file_with_lock));
+  fwl->file = NULL;
+  if (pthread_mutex_init(&(fwl->file_mut), NULL) < 0) {
     syslog(LOG_ERR, "Error initializing mutex");
+    freeaddrinfo(res);
+    closelog();
+    close(sockfd);
     return (-1);
   }
   // create file to read/write to
@@ -309,69 +427,84 @@ int main(int argc, char **argv) {
     return (-1);
   }
 
-  client_thread_node_t *ll_head = NULL;
+  // start the timestamp thread
+  pthread_t ts_thread;
+  pthread_create(&ts_thread, NULL, handle_timestamp, NULL);
+
+  struct client_thread_node *head = NULL;
 
   // shutdown_flag is raised when SIGINT or SIGTERM is raised
   // this way the while loop has a way to exit
   while (!shutdown_flag) {
+    struct sockaddr_storage inc_addr;
+    socklen_t inc_addr_size = sizeof inc_addr;
     clientfd = accept(sockfd, (struct sockaddr *)&inc_addr, &inc_addr_size);
     if (clientfd == -1) {
       if (shutdown_flag)
         break;
       syslog(LOG_ERR, "Error on accepting client");
-      continue; // continue trying to accept clients;
+      continue; // continue trying to accept clients
     }
 
-    // accepted a client, log the client IP
-    char ipstr[INET6_ADDRSTRLEN];
-    struct sockaddr_in *s = (struct sockaddr_in *)&inc_addr;
-    inet_ntop(AF_INET, &s->sin_addr, ipstr, sizeof ipstr);
-    syslog(LOG_INFO, "Accepted connection from %s", ipstr);
-
-    // should make a new thread here and add that to the linked list
-    syslog(LOG_INFO, "Adding new thread and node\n");
-    pthread_t conn_tid;
-    client_thread_node_t *new_node =
-        new_client_thread_node(clientfd, conn_tid, ipstr, fwl);
-    pthread_create(&conn_tid, NULL, handle_connection, new_node);
-    syslog(LOG_INFO, "New thread with id %lu made", conn_tid);
-
-    if (ll_head == NULL) {
-      syslog(LOG_INFO, "Assigning new head node\n");
-      ll_head = new_node;
-    } else {
-      llist_add_to_end(ll_head, new_node);
-      syslog(LOG_INFO, "Added new node to list\n");
+    struct client_node *c_node =
+        client_node_new(clientfd, inc_addr, inc_addr_size);
+    if (c_node == NULL) {
+      break;
     }
 
-    // new client added, search through linked list for any finished threads
-    // and pthread_join() them
-    client_thread_node_t *current_node = ll_head;
-    syslog(LOG_INFO, "Traversing linked list to join threads");
-    if (current_node) {
-      while (current_node != NULL) {
-        if (current_node->thread_exited == true) {
-          syslog(LOG_INFO, "joining thread %lu", current_node->thread);
-          pthread_join(current_node->thread, NULL);
-          syslog(LOG_INFO, "closing clientfd%d", current_node->clientfd);
+    pthread_t tid;
+    pthread_create(&tid, NULL, handle_connection, (void *)c_node);
 
-          shutdown(current_node->clientfd, SHUT_RDWR);
-          client_thread_node_t *tmp = current_node->next;
-          llist_remove_by_pthread(&ll_head, current_node->thread);
-          current_node = tmp;
-        } else {
-          // continue as normal
-          current_node = current_node->next;
-        }
+    struct client_thread_node *ct_node =
+        malloc(sizeof(struct client_thread_node));
+    if (ct_node == NULL) {
+      break;
+    }
+    ct_node->client_node = c_node;
+    ct_node->tid = tid;
+    ct_node->next = NULL;
+
+    list_add_to_start(&head, ct_node);
+
+    struct client_thread_node *current = head;
+
+    while (current != NULL) {
+      if (current->client_node->operation_complete == true) {
+        pthread_t join_id = current->tid;
+        syslog(LOG_INFO, "Removing thread with id %lu", join_id);
+
+        shutdown(current->client_node->clientfd, SHUT_RDWR);
+        pthread_join(join_id, NULL);
+        struct client_thread_node *temp = current->next;
+        list_remove_using_client_file_node(&head, current);
+        current = temp;
+      } else {
+        current = current->next;
       }
     }
   }
 
   syslog(LOG_INFO, "Cleaning up, exit signal caught");
+  // cleanup any remaining threads
+  while (head != NULL) {
+    pthread_cancel(head->tid);
+    pthread_join(head->tid, NULL);
+    shutdown(head->client_node->clientfd, SHUT_RDWR);
+
+    struct client_thread_node *temp = head->next;
+    list_remove_head(&head);
+    head = temp;
+  }
+
+  pthread_cancel(ts_thread);
+  pthread_join(ts_thread, NULL);
   freeaddrinfo(res);
   shutdown(sockfd, SHUT_RDWR);
   closelog();
-  free_file_with_lock(fwl);
+  file_with_lock_free(fwl);
   remove(AESDFILE);
+  if (daemon) {
+    close(dev_null);
+  }
   return (0);
 }

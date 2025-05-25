@@ -1,6 +1,6 @@
 CROSS_COMPILE=
 CC=$(CROSS_COMPILE)gcc
-CFLAGS= -Wall -Werror
+CFLAGS= -Wall -Werror -g
 DEPS=
 LIBS=-lpthread
 
