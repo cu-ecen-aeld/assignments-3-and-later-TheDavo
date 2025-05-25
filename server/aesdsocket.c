@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <asm-generic/socket.h>
+#include <bits/time.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -230,16 +231,21 @@ void *handle_timestamp() {
   time_t t;
   struct tm *tmp;
 
+  struct timespec wakey;
+  clock_gettime(CLOCK_REALTIME, &wakey);
+
   // this initial sleep call is here because if this thread started first
   // prior to the client socket threads the test would fail as the first
   // line in the temporary file is a timestamp and not a client read
-  sleep(10);
+  // sleep(10);
 
   // global shutdown flag signal
   while (!shutdown_flag) {
+    wakey.tv_sec += 10;
     if (shutdown_flag) {
       break;
     }
+    clock_nanosleep(CLOCK_REALTIME,TIMER_ABSTIME , &wakey, NULL);
     t = time(NULL);
     tmp = localtime(&t);
     if (tmp == NULL) {
@@ -264,7 +270,7 @@ void *handle_timestamp() {
     fwrite(outstr, sizeof(char), sizeof(outstr), fwl->file);
     fflush(fwl->file);
     pthread_mutex_unlock(&(fwl->file_mut));
-    sleep(10);
+    // sleep(10);
   }
 
   pthread_exit(NULL);
@@ -369,7 +375,7 @@ int main(int argc, char **argv) {
 
     // parent process, end here
     if (fork_pid != 0) {
-      syslog(LOG_INFO, "Exiting as fork for parent");
+      syslog(LOG_INFO, "Exiting at fork for parent");
       freeaddrinfo(res);
       closelog();
       close(sockfd);
@@ -424,6 +430,7 @@ int main(int argc, char **argv) {
     freeaddrinfo(res);
     closelog();
     close(sockfd);
+    pthread_mutex_destroy(&(fwl->file_mut));
     return (-1);
   }
 
