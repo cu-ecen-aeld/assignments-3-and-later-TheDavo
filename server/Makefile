@@ -1,8 +1,8 @@
-CROSS_COMPILE=
-CC=$(CROSS_COMPILE)gcc
-CFLAGS= -Wall -Werror -g
-DEPS=
-LIBS=-lpthread
+CROSS_COMPILE ?=
+CC ?=$(CROSS_COMPILE)gcc
+CFLAGS ?= -Wall -Werror -g
+DEPS ?=
+LDFLAGS ?=-lpthread
 
 SRCS=aesdsocket.c
 OBJS=$(SRCS:.c=.o)
@@ -11,10 +11,10 @@ OBJS=$(SRCS:.c=.o)
 MAIN=aesdsocket
 
 all: $(SRCS)
-	$(CC) $(CFLAGS) $^ -o $(MAIN) $(LIBS)
+	$(CC) $(CFLAGS) $^ -o $(MAIN) $(LDFLAGS)
 
 $(MAIN): $(SRCS)
-	$(CC) $(CFLAGS) $^ -o $@ $(LIBS)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 clean:
 	rm -f $(OBJS) $(MAIN)
