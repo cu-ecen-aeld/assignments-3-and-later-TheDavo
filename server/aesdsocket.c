@@ -424,7 +424,7 @@ int main(int argc, char **argv) {
     return (-1);
   }
   // create file to read/write to
-  fwl->file = fopen(AESDFILE, "a+");
+  fwl->file = fopen(AESDFILE, "w+");
   if (fwl->file == NULL) {
     syslog(LOG_ERR, "Error on creating aesdfile");
     freeaddrinfo(res);
@@ -436,7 +436,7 @@ int main(int argc, char **argv) {
 
   // start the timestamp thread
   pthread_t ts_thread;
-  pthread_create(&ts_thread, NULL, handle_timestamp, NULL);
+  bool start_timestamp = true;
 
   struct client_thread_node *head = NULL;
 
@@ -451,6 +451,11 @@ int main(int argc, char **argv) {
         break;
       syslog(LOG_ERR, "Error on accepting client");
       continue; // continue trying to accept clients
+    }
+
+    if (start_timestamp) {
+      pthread_create(&ts_thread, NULL, handle_timestamp, NULL);
+      start_timestamp = false;
     }
 
     struct client_node *c_node =
