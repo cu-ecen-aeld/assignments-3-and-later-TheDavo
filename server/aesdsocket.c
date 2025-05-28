@@ -423,7 +423,17 @@ int main(int argc, char **argv) {
     close(sockfd);
     return (-1);
   }
+
+  // check if the file already exists (bad exit could cause this)
+  // and delete it before creating a new one
+  FILE *aesd_exists = fopen(AESDFILE, "r");
+  if (aesd_exists != NULL) {
+    fclose(aesd_exists);
+    remove(AESDFILE);
+  }
+  
   // create file to read/write to
+
   fwl->file = fopen(AESDFILE, "w+");
   if (fwl->file == NULL) {
     syslog(LOG_ERR, "Error on creating aesdfile");
