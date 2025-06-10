@@ -149,7 +149,6 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
   // a new buffer entry shall not be placed in to the buffer until a newline
   // character is found, work with dev->working_entry for that case
 
-  size_t bytes_to_read_from_user = count;
   size_t offset = 0;
 
   // if the working entry already has content in memory krealloac has to be
@@ -180,17 +179,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
       return retval;
     }
   }
-
-  // pointers/memory allocated, can copy from the user now
-  if (copy_from_user((void *)(offset + dev->working_entry.buffptr), buf,
-                     bytes_to_read_from_user)) {
-    PDEBUG("aesd_write: error copying from user to circular buffer");
-    retval = -EFAULT;
-    mutex_unlock(&dev->dev_mutex);
-    return retval;
-  }
-
-  PDEBUG("user buffer: %s\n", dev->working_entry.buffptr);
+  memcpy((void *)(dev->working_entry.buffptr + offset), kbuff, count);
 
   // from aesdsocket implementation to find newline character
   char *newline_pos =
@@ -211,7 +200,11 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     }
   }
 
+  PDEBUG("user buffer: %s\n", dev->working_entry.buffptr);
+
   mutex_unlock(&dev->dev_mutex);
+  kfree(kbuff);
+  retval = count;
   return retval;
 }
 struct file_operations aesd_fops = {
