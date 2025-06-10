@@ -179,6 +179,14 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
       return retval;
     }
   }
+
+  if (NULL == dev->working_entry.buffptr) {
+    PDEBUG("aesd_write: working_entry.buffptr NULL before memcpy");
+    kfree(kbuff);
+    mutex_unlock(&dev->dev_mutex);
+    return -EFAULT;
+  }
+  
   memcpy((void *)(dev->working_entry.buffptr + offset), kbuff, count);
 
   // from aesdsocket implementation to find newline character
@@ -193,17 +201,15 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
       kfree(released);
     }
 
-    if (NULL != dev->working_entry.buffptr) {
-      kfree(dev->working_entry.buffptr);
-      dev->working_entry.buffptr = NULL;
-      dev->working_entry.size = 0;
-    }
+    // reset working_entry for the next write
+    dev->working_entry.buffptr = NULL;
+    dev->working_entry.size = 0;
   }
 
-  PDEBUG("user buffer: %s\n", dev->working_entry.buffptr);
+
+  kfree(kbuff);
 
   mutex_unlock(&dev->dev_mutex);
-  kfree(kbuff);
   retval = count;
   return retval;
 }
