@@ -214,9 +214,6 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     const char *released =
         aesd_circular_buffer_add_entry(&dev->buffer, &dev->working_entry);
     if (NULL != released) {
-      PDEBUG(
-          "aesd_write: buffer is full, releasing oldest entry at out_offs %d",
-          aesd_device.buffer.out_offs);
       kfree(released);
     }
 

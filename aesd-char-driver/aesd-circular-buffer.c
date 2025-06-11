@@ -95,7 +95,6 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(
 const char *aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer,
                                     const struct aesd_buffer_entry *add_entry) {
   const char *replaced = NULL;
-  buffer->entry[buffer->in_offs] = *add_entry;
   // the function brief says that the @param add_entry memory and lifetime
   // will be managed by the caller, this function will not free or handle
   // any memory management
@@ -111,6 +110,8 @@ const char *aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer,
     buffer->out_offs =
         ((buffer->out_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED);
   }
+
+  buffer->entry[buffer->in_offs] = *add_entry;
 
   buffer->in_offs =
       ((buffer->in_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED);
