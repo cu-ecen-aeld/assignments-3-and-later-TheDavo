@@ -68,7 +68,6 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
 
   // have the mutex, can now safely send content back to the user
 
-  size_t bytes_read_by_user = 0;
   // continue to send content to the user until the amount sent is the
   // amount requested, or an error occurs
   // get the relevant entry based on *f_pos
@@ -78,7 +77,9 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
                                                       &offset_in_entry);
 
   if (NULL == entry) {
-    PDEBUG("aesd_read: error getting entry, buffer may be empty");
+    PDEBUG("aesd_read: entry at f_pos returned NULL, buffer may be empty or at "
+           "EOF");
+    PDEBUG("aesd_read: retval at NULL == entry %lu", retval);
     mutex_unlock(&dev->dev_mutex);
     return retval;
   }
@@ -99,7 +100,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
   // user buffer location
 
   // copy_to_user sends a 0 on success, so anything else is an error
-  if (copy_to_user(buf + bytes_read_by_user, entry->buffptr + offset_in_entry,
+  if (copy_to_user(buf, entry->buffptr + offset_in_entry,
                    count_bytes_to_send)) {
     PDEBUG("aesd_read: error sending content to user");
     retval = -EFAULT;
@@ -110,7 +111,23 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
   // successfully copied to user, update file position and amount of bytes
   // read
   *f_pos += count_bytes_to_send;
-  retval = bytes_read_by_user;
+  retval = count_bytes_to_send;
+  PDEBUG("aesd_read: count %lu", count);
+  PDEBUG("aesd_read: count_bytes_to_send %lu", count_bytes_to_send);
+  PDEBUG("aesd_read: retval %lu", retval);
+
+  ssize_t sum = 0;
+  size_t i;
+  for (i = 0; i < AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED; i++) {
+    sum += aesd_device.buffer.entry[i].size;
+  }
+
+  // no more bytes to read, end of file
+  if (*f_pos > sum) {
+    retval = 0;
+  }
+
+  PDEBUG("aesd_read: retval after EOF check %lu", retval);
 
   mutex_unlock(&dev->dev_mutex);
   return retval;
@@ -124,7 +141,6 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
   PDEBUG("write %zu bytes with offset %lld", count, *f_pos);
   struct aesd_dev *dev = filp->private_data;
 
-
   if (mutex_lock_interruptible(&dev->dev_mutex)) {
     PDEBUG("aesd_read: failed to lock mutex");
     return -ERESTARTSYS;
@@ -137,7 +153,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     mutex_unlock(&dev->dev_mutex);
     return retval;
   }
-  
+
   // pointers/memory allocated, can copy from the user now
   if (copy_from_user(kbuff, buf, count)) {
     PDEBUG("aesd_write: error copying from user to kernel allocated buffer");
@@ -186,7 +202,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     mutex_unlock(&dev->dev_mutex);
     return -EFAULT;
   }
-  
+
   memcpy((void *)(dev->working_entry.buffptr + offset), kbuff, count);
 
   // from aesdsocket implementation to find newline character
@@ -198,6 +214,9 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     const char *released =
         aesd_circular_buffer_add_entry(&dev->buffer, &dev->working_entry);
     if (NULL != released) {
+      PDEBUG(
+          "aesd_write: buffer is full, releasing oldest entry at out_offs %d",
+          aesd_device.buffer.out_offs);
       kfree(released);
     }
 
@@ -205,7 +224,6 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     dev->working_entry.buffptr = NULL;
     dev->working_entry.size = 0;
   }
-
 
   kfree(kbuff);
 
@@ -262,13 +280,21 @@ void aesd_cleanup_module(void) {
   cdev_del(&aesd_device.cdev);
 
   // loop through the circular buffer and free each entry using the macro
-  struct aesd_buffer_entry *entry;
+  // struct aesd_buffer_entry *entry;
   uint8_t i;
-  AESD_CIRCULAR_BUFFER_FOREACH(entry, &aesd_device.buffer, i) {
-    if (NULL != entry->buffptr) {
-      kfree(entry->buffptr);
-      entry->buffptr = NULL;
-      entry->size = 0;
+  // AESD_CIRCULAR_BUFFER_FOREACH(entry, &aesd_device.buffer, i) {
+  //   if (NULL != entry->buffptr) {
+  //     kfree(entry->buffptr);
+  //     entry->buffptr = NULL;
+  //     entry->size = 0;
+  //   }
+  // }
+
+  for (i = 0; i < AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED; i++) {
+    if (NULL != aesd_device.buffer.entry[i].buffptr) {
+      kfree(aesd_device.buffer.entry[i].buffptr);
+      aesd_device.buffer.entry[i].buffptr = NULL;
+      aesd_device.buffer.entry[i].buffptr = 0;
     }
   }
 
@@ -279,7 +305,6 @@ void aesd_cleanup_module(void) {
     aesd_device.working_entry.size = 0;
   }
 
-  mutex_unlock(&aesd_device.dev_mutex);
   mutex_destroy(&aesd_device.dev_mutex);
 
   unregister_chrdev_region(devno, 1);
