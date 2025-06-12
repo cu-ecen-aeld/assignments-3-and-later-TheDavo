@@ -80,6 +80,14 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     PDEBUG("aesd_read: entry at f_pos returned NULL, buffer may be empty or at "
            "EOF");
     PDEBUG("aesd_read: retval at NULL == entry %lu", retval);
+    ssize_t sum = 0;
+    size_t i;
+    for (i = 0; i < AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED; i++) {
+      // PDEBUG("i: %lu str: %s size: %lu", i,
+      // aesd_device.buffer.entry[i].buffptr, aesd_device.buffer.entry[i].size);
+      sum += aesd_device.buffer.entry[i].size;
+    }
+    PDEBUG("size of buffer at NULL == entry %ld", sum);
     mutex_unlock(&dev->dev_mutex);
     return retval;
   }
@@ -146,7 +154,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     return -ERESTARTSYS;
   }
 
-  void *kbuff = kmalloc(count, GFP_KERNEL);
+  char *kbuff = kzalloc(count, GFP_KERNEL);
   if (NULL == kbuff) {
     PDEBUG("aesd_write: error allocating buffer for __user *buf");
     retval = -EFAULT;
@@ -155,6 +163,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
   }
 
   // pointers/memory allocated, can copy from the user now
+  PDEBUG("copy_from_user count %lu", count);
   if (copy_from_user(kbuff, buf, count)) {
     PDEBUG("aesd_write: error copying from user to kernel allocated buffer");
     retval = -EFAULT;
@@ -167,12 +176,25 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 
   size_t offset = 0;
 
+  // assume that all the count bytes will be added to the working buffer entry
+  size_t bytes_to_add = count;
+
+  // check if kbuff has a newline, that will determine how much to add to
+  // an existing buffer
+  // from aesdsocket implementation to find newline character
+  char *newline_pos_kbuff = (char *)memchr(kbuff, '\n', count);
+  if (NULL != newline_pos_kbuff) {
+    bytes_to_add = newline_pos_kbuff - kbuff + 1; // include the newline
+    PDEBUG("aesd_write: newline found in kbuff, bytes_to_add is %lu",
+           bytes_to_add);
+  }
+
   // if the working entry already has content in memory krealloac has to be
   // used to ask for more memory from the kernel
   if (NULL != dev->working_entry.buffptr) {
     dev->working_entry.buffptr =
-        krealloc(dev->working_entry.buffptr, dev->working_entry.size + count,
-                 GFP_KERNEL);
+        krealloc(dev->working_entry.buffptr,
+                 dev->working_entry.size + bytes_to_add, GFP_KERNEL);
 
     if (NULL == dev->working_entry.buffptr) {
       PDEBUG("aesd_write: krealloc error");
@@ -182,14 +204,14 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     }
 
     offset = dev->working_entry.size;
-    dev->working_entry.size = dev->working_entry.size + count;
+    dev->working_entry.size = dev->working_entry.size + bytes_to_add;
   } else {
     // allocate a new buffer pointer
-    dev->working_entry.buffptr = kmalloc(count, GFP_KERNEL);
-    dev->working_entry.size = count;
+    dev->working_entry.buffptr = kzalloc(bytes_to_add, GFP_KERNEL);
+    dev->working_entry.size = bytes_to_add;
 
     if (NULL == dev->working_entry.buffptr) {
-      PDEBUG("aesd_write: kmalloc error");
+      PDEBUG("aesd_write: kzalloc error");
       retval = -EFAULT;
       mutex_unlock(&dev->dev_mutex);
       return retval;
@@ -203,13 +225,14 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     return -EFAULT;
   }
 
-  memcpy((void *)(dev->working_entry.buffptr + offset), kbuff, count);
+  memcpy((void *)(dev->working_entry.buffptr + offset), kbuff, bytes_to_add);
 
   // from aesdsocket implementation to find newline character
-  char *newline_pos =
-      (char *)memchr(dev->working_entry.buffptr, '\n', dev->working_entry.size);
+  // char *newline_pos =
+  //     (char *)memchr(dev->working_entry.buffptr, '\n',
+  //     dev->working_entry.size);
   // add the new entry to the buffer, and free the previous one
-  if (NULL != newline_pos) {
+  if (NULL != newline_pos_kbuff) {
     PDEBUG("aesd_write: new entry added to dev->buffer");
     const char *released =
         aesd_circular_buffer_add_entry(&dev->buffer, &dev->working_entry);

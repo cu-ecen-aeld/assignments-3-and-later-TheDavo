@@ -17,9 +17,19 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef USE_AESD_CHAR_DEVICE
+#define USE_AESD_CHAR_DEVICE 1
+#endif
+
 #define BACKLOG 10
 #define PORT "9000"
+
+#if USE_AESD_CHAR_DEVICE
+#define AESDFILE "/dev/aesdchar"
+#else
 #define AESDFILE "/var/tmp/aesdsocketdata"
+#endif
+
 #define BUFSIZE 4096
 
 volatile sig_atomic_t shutdown_flag = 0;
@@ -47,11 +57,11 @@ struct client_node {
 };
 
 /**
- * client_node_new takes in struct members, allocates space for a new 
+ * client_node_new takes in struct members, allocates space for a new
  * `client_node` struct and assigns the members.
  *
  * This function also calls `inet_ntop` to get the calling ip addr
-*/
+ */
 struct client_node *client_node_new(int clientfd,
                                     struct sockaddr_storage inc_addr,
                                     socklen_t inc_addr_size) {
@@ -171,10 +181,10 @@ void *handle_connection(void *_node) {
 
   int read_bytes = 0;
   char *line = NULL;
-  size_t len = 0;
-  ssize_t read_line_count;
+  ssize_t read_count;
 
   while ((read_bytes = recv(node->clientfd, buffer, BUFSIZE, 0)) > 0) {
+    syslog(LOG_DEBUG, "buffer read: %s", buffer);
     char *newline_pos = (char *)memchr(buffer, '\n', read_bytes);
 
     // found a newline in the buffer, write to the file and then
@@ -182,6 +192,7 @@ void *handle_connection(void *_node) {
     if (newline_pos != NULL) {
 
       pthread_mutex_lock(&(fwl->file_mut));
+#if !USE_AESD_CHAR_DEVICE
       if (fwl->file == NULL) {
         syslog(LOG_ERR, "File pointer is NULL");
         pthread_mutex_unlock(&(fwl->file_mut));
@@ -194,16 +205,33 @@ void *handle_connection(void *_node) {
       fflush(fwl->file);
 
       rewind(fwl->file);
-      while ((read_line_count = getline(&line, &len, fwl->file)) != -1) {
+
+      size_t len = 0;
+      while ((read_count = getline(&line, &len, fwl->file)) != -1) {
         // syslog(LOG_INFO, "Sending line %s", line);
-        send(node->clientfd, line, read_line_count, 0);
+        send(node->clientfd, line, read_count, 0);
       }
+#else
+      int char_dev = open(AESDFILE, O_RDWR);
+      write(char_dev, buffer, newline_pos - buffer + 1);
+      while ((read_count = read(char_dev, buffer, sizeof(buffer))) > 0) {
+        // syslog(LOG_INFO, "Sending line %s", line);
+        send(node->clientfd, buffer, read_count, 0);
+      }
+      close(char_dev);
+#endif
       pthread_mutex_unlock(&(fwl->file_mut));
     } else {
       // no newline character found, add whole buffer to file
       pthread_mutex_lock(&(fwl->file_mut));
+#if !USE_AESD_CHAR_DEVICE
       fwrite(buffer, sizeof(char), read_bytes, fwl->file);
       fflush(fwl->file);
+#else
+      int char_dev = open(AESDFILE, O_RDWR);
+      write(char_dev, buffer, read_bytes);
+      close(char_dev);
+#endif
       pthread_mutex_unlock(&(fwl->file_mut));
     }
   }
@@ -245,7 +273,7 @@ void *handle_timestamp() {
     if (shutdown_flag) {
       break;
     }
-    clock_nanosleep(CLOCK_REALTIME,TIMER_ABSTIME , &wakey, NULL);
+    clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &wakey, NULL);
     t = time(NULL);
     tmp = localtime(&t);
     if (tmp == NULL) {
@@ -280,7 +308,7 @@ void *handle_timestamp() {
  * raise_shutdown_flag catches the SIG_INT and SIG_TERM signals and changes
  * the `shutdown_flag` to (1), causing the infinite while loops to exit
  * and close the program
-*/
+ */
 void raise_shutdown_flag(int signo) { shutdown_flag = 1; }
 
 void print_usage(void) {
@@ -426,27 +454,33 @@ int main(int argc, char **argv) {
 
   // check if the file already exists (bad exit could cause this)
   // and delete it before creating a new one
+#if !USE_AESD_CHAR_DEVICE
   FILE *aesd_exists = fopen(AESDFILE, "r");
   if (aesd_exists != NULL) {
     fclose(aesd_exists);
     remove(AESDFILE);
   }
-  
-  // create file to read/write to
 
-  fwl->file = fopen(AESDFILE, "w+");
+  // create file to read/write to
+  fwl->file = fopen(AESDFILE, "a+");
   if (fwl->file == NULL) {
-    syslog(LOG_ERR, "Error on creating aesdfile");
+    syslog(LOG_ERR, "Error on opening aesdfile");
     freeaddrinfo(res);
     closelog();
     close(sockfd);
     pthread_mutex_destroy(&(fwl->file_mut));
     return (-1);
   }
+#endif
 
   // start the timestamp thread
   pthread_t ts_thread;
+
+#if !USE_AESD_CHAR_DEVICE
   bool start_timestamp = true;
+#else
+  bool start_timestamp = false;
+#endif
 
   struct client_thread_node *head = NULL;
 
@@ -518,13 +552,21 @@ int main(int argc, char **argv) {
     head = temp;
   }
 
+#if !USE_AESD_CHAR_DEVICE
   pthread_cancel(ts_thread);
   pthread_join(ts_thread, NULL);
+#endif
+
   freeaddrinfo(res);
   shutdown(sockfd, SHUT_RDWR);
   closelog();
   file_with_lock_free(fwl);
+#if !USE_AESD_CHAR_DEVICE
+  // if the character device is being used, the device file should not be
+  // deleted
+  // otherwise, delete the temporary file
   remove(AESDFILE);
+#endif
   if (daemon) {
     close(dev_null);
   }
