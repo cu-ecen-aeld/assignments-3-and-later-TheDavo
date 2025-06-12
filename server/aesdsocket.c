@@ -44,7 +44,9 @@ struct file_with_lock *fwl;
 
 void file_with_lock_free(struct file_with_lock *fwl) {
   pthread_mutex_destroy(&fwl->file_mut);
-  fclose(fwl->file);
+  if (NULL != fwl->file) {
+    fclose(fwl->file);
+  }
   free(fwl);
 }
 
