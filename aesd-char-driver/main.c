@@ -123,7 +123,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
 
   // successfully copied to user, update file position and amount of bytes
   // read
-  *f_pos += count_bytes_to_send;
+  // *f_pos += count_bytes_to_send;
   retval = count_bytes_to_send;
   PDEBUG("aesd_read: count %lu", count);
   PDEBUG("aesd_read: count_bytes_to_send %lu", count_bytes_to_send);
@@ -140,8 +140,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     retval = 0;
   }
 
-  PDEBUG("aesd_read: retval after EOF check %lu", retval);
-
+  *f_pos += retval;
   mutex_unlock(&dev->dev_mutex);
   return retval;
 }
@@ -247,11 +246,11 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 
   kfree(kbuff);
 
+   mutex_unlock(&dev->dev_mutex);
+  retval = bytes_to_add;
   // add the bytes written to the offset so that the llseek function will
   // work
-  *f_pos += bytes_to_add;
-  mutex_unlock(&dev->dev_mutex);
-  retval = count;
+  *f_pos += retval;
   return retval;
 }
 
@@ -332,6 +331,8 @@ int aesd_adjust_file_offset(struct file *filp, uint32_t cmd,
     return retval;
   }
 
+  PDEBUG("aesd_adjust_file_offset: adjusting for command %u at offset %u", cmd,
+         cmd_offset);
   // calculate the offset from zero
   loff_t offset = 0;
   // go up to the cmd (not including it) and add the sizes up
@@ -340,12 +341,12 @@ int aesd_adjust_file_offset(struct file *filp, uint32_t cmd,
   }
 
   offset += cmd_offset;
+  PDEBUG("aesd_adjust_file_offset: final offset %llu", offset);
   filp->f_pos = offset;
   mutex_unlock(&aesd_device->dev_mutex);
-  
+
   return retval;
 }
-
 
 long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 

@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/syslog.h>
 #include <sys/types.h>
@@ -26,6 +27,9 @@
 
 #if USE_AESD_CHAR_DEVICE
 #define AESDFILE "/dev/aesdchar"
+#include "../aesd-char-driver/aesd_ioctl.h"
+#define AESD_IOCTLSEEKTOCMD "AESDCHAR_IOCSEEKTO:"
+#define AESD_IOCTLSEEKTOCMD_LEN strlen(AESD_IOCTLSEEKTOCMD)
 #else
 #define AESDFILE "/var/tmp/aesdsocketdata"
 #endif
@@ -215,10 +219,28 @@ void *handle_connection(void *_node) {
       }
 #else
       int char_dev = open(AESDFILE, O_RDWR);
-      write(char_dev, buffer, newline_pos - buffer + 1);
-      while ((read_count = read(char_dev, buffer, sizeof(buffer))) > 0) {
-        // syslog(LOG_INFO, "Sending line %s", line);
-        send(node->clientfd, buffer, read_count, 0);
+      // check for the seekto command
+      if (strncmp(buffer, AESD_IOCTLSEEKTOCMD, AESD_IOCTLSEEKTOCMD_LEN) == 0) {
+        syslog(LOG_INFO, "aesd ioctl cmd found, parsing...");
+        struct aesd_seekto seekto;
+        sscanf(buffer, AESD_IOCTLSEEKTOCMD "%u,%u", &seekto.write_cmd,
+               &seekto.write_cmd_offset);
+        if ((ioctl(char_dev, AESDCHAR_IOCSEEKTO, &seekto)) < 0) {
+          syslog(LOG_ERR, "error sending seekto cmd over ioctl");
+        }
+        syslog(LOG_INFO, "parsed ioctl: cmd: %u, cmd_offset: %u",
+               seekto.write_cmd, seekto.write_cmd_offset);
+        while ((read_count = read(char_dev, buffer, sizeof(buffer))) > 0) {
+          // syslog(LOG_INFO, "Sending line to driver: %s", buffer);
+          send(node->clientfd, buffer, read_count, 0);
+        }
+      } else {
+        write(char_dev, buffer, newline_pos - buffer + 1);
+        lseek(char_dev, 0, SEEK_SET);
+        while ((read_count = read(char_dev, buffer, sizeof(buffer))) > 0) {
+            // syslog(LOG_INFO, "Sending line to driver: %s", buffer);
+            send(node->clientfd, buffer, read_count, 0);
+          }
       }
       close(char_dev);
 #endif
